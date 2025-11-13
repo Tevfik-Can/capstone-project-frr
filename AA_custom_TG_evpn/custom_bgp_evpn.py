@@ -279,49 +279,45 @@ def test_host_movement(tgen):
     # ----------------------------------------------------------------------
     # Inner function: checks if OSPFv2 neighbor adjacency is FULL.
     # ----------------------------------------------------------------------
-    def move_host_from(curr_host, target_host):
+    def move_host_from(curr_hostname, target_hostname, targeted_ip, targeted_mac):
         # for host_name in hosts:
-        host1 = tgen.gears[curr_host]
-        host2 = tgen.gears[target_host]
+        curr_host = tgen.gears[curr_hostname]
+        target_host = tgen.gears[target_hostname]
 
-        def host_info_switcharoo(root_host,newhost,bond_name, root_host_name):
+        def change_addresses(bond_name, targeted_ip):
             """
             Move the host to a different interface to simulate failover
             """
-            host_ip, host_mac = compute_host_ip_mac(newhost)
-            host_ip_root, host_mac_root = compute_host_ip_mac(root_host_name)
 
             # Add the removal of the host_ip from the previous owner. So that the previous owner does not contain the IP anymore.
-            root_host.run(f"ip addr add {host_ip} dev {bond_name}")
-            root_host.run(f"ip addr del {host_ip_root}/24 dev vtepbond")
-            root_host.run(f"ip link set dev {bond_name} address {host_mac}")
-            root_host.run("ip neigh flush all")
+            curr_host.run(f"ip addr del {targeted_ip}/24 dev {bond_name}")
+
+            target_host.run(f"ip addr add {targeted_ip} dev {bond_name}")
+            target_host.run(f"ip link set dev {bond_name} address {targeted_mac}")
+            target_host.run("ip neigh flush all")
 
         def run_command_and_expect():
             # Run the FRRouting command via vtysh, output in JSON format.
-            # Example command: `show ip ospf neighbor <neighbor> json`
+            # Example command: `show evpn mac vni 1000 json`
             # Verify the connection has changed using vtep1
             output_before = tgen.gears["vtep1"].vtysh_cmd("show evpn mac vni 1000 json", isjson=True)
+
             print(f"Before movement FDB:\n{output_before}")
-
+            change_addresses("vtepbond", targeted_ip)
             # initial_host2 = host2
-            host_info_switcharoo( host2, host1_name, "vtepbond", host2_name)
-            host_info_switcharoo( host1, host2_name, "vtepbond", host1_name)
-
-            host1_ip, host1_mac = compute_host_ip_mac(host1_name)
 
             output_after = tgen.gears["vtep1"].vtysh_cmd("show evpn mac vni 1000 json", isjson=True)
             print(f"After movement FDB:\n{output_after}")
 
-            if topotest.json_cmp(output_before["macs"][host1_mac]["type"], output_after["macs"][host1_mac]["type"]) is None:
+            if topotest.json_cmp(output_before["macs"][targeted_mac]["type"], output_after["macs"][targeted_mac]["type"]) is None:
                 # Return None to indicate success (the neighbor is FULL).
                 return None
             else:
                 if output_after["macs"][host1_mac]["type"] != "remote":
-                    if topotest.json_cmp(output_before["macs"][host1_mac]["remoteVtep"], output_after["macs"][host1_mac]["remoteVtep"]) is None:
+                    if topotest.json_cmp(output_before["macs"][targeted_mac]["remoteVtep"], output_after["macs"][targeted_mac]["remoteVtep"]) is None:
                         return None
             # Otherwise, return the diff (meaning not yet FULL).
-            return topotest.json_cmp(output_before["macs"][host1_mac]["type"], output_after["macs"][host1_mac]["type"])
+            return topotest.json_cmp(output_before["macs"][targeted_mac]["type"], output_after["macs"][targeted_mac]["type"])
 
         # ------------------------------------------------------------------
         # Keep retrying the check until it succeeds or times out.
@@ -335,11 +331,11 @@ def test_host_movement(tgen):
 
         # If the result is not None after all retries, OSPF didn't converge.
         assertmsg = (
-            f"The MAC and IP address of {host1_name} has not changed\n"
+            f"The MAC and IP address in {curr_hostname} has not moved\n"
         )
         assert result is None, assertmsg
 
-    move_host_from("host1","host2")
+    move_host_from("host1","host2", "192.168.0.10", "00:00:00:00:00:01")
 
 
 def test_get_version(tgen):
