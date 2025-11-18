@@ -17,7 +17,7 @@ import os
 import re
 import sys
 from functools import partial
-from time import sleep
+from time import sleep, time
 import platform
 import pytest
 
@@ -54,36 +54,6 @@ pytestmark = [
 ]
 
 
-def config_bond(node, bond_name, bond_members, bond_ad_sys_mac, br):
-    """
-    Used to setup bonds on the TORs and hosts for MH
-    """
-    node.run("ip link add dev %s type bond mode 802.3ad" % bond_name)
-    node.run("ip link set dev %s type bond lacp_rate 1" % bond_name)
-    node.run("ip link set dev %s type bond miimon 100" % bond_name)
-    node.run("ip link set dev %s type bond xmit_hash_policy layer3+4" % bond_name)
-    node.run("ip link set dev %s type bond min_links 1" % bond_name)
-    node.run(
-        "ip link set dev %s type bond ad_actor_system %s" % (bond_name, bond_ad_sys_mac)
-    )
-
-    for bond_member in bond_members:
-        node.run("ip link set dev %s down" % bond_member)
-        node.run("ip link set dev %s master %s" % (bond_member, bond_name))
-        node.run("ip link set dev %s up" % bond_member)
-
-    node.run("ip link set dev %s up" % bond_name)
-
-    # if bridge is specified add the bond as a bridge member
-    if br:
-        node.run(" ip link set dev %s master %s" % (bond_name, br))
-        node.run("/sbin/bridge link set dev %s priority 8" % bond_name)
-        node.run("/sbin/bridge vlan del vid 1 dev %s" % bond_name)
-        node.run("/sbin/bridge vlan del vid 1 untagged pvid dev %s" % bond_name)
-        node.run("/sbin/bridge vlan add vid 1000 dev %s" % bond_name)
-        node.run("/sbin/bridge vlan add vid 1000 untagged pvid dev %s" % bond_name)
-
-
 def config_l2vni(vtep_name, node, svi_ip, vtep_ip):
     """
     On torm1x amd torm21,
@@ -103,7 +73,7 @@ def config_l2vni(vtep_name, node, svi_ip, vtep_ip):
     # node.run("ip link set br1000 master vrf500")
     node.run("ip addr add %s/24 dev br1000" % svi_ip)
     # NOTE TO SELF: Is this the any gateway address for hosts to reach: 
-    node.run("ip addr add 192.168.0.1/24 dev br1000")
+    node.run("ip addr add 192.168.0.254/24 dev br1000")
     node.run("/sbin/sysctl net.ipv4.conf.br1000.arp_accept=1")
 
     node.run(
@@ -128,9 +98,9 @@ vtep_ips = {
 }
 
 svi_ips = {
-    "vtep1": "192.168.0.11",
-    "vtep2": "192.168.0.12",
-    "vtep3": "192.168.0.13"
+    "vtep1": "192.168.0.210",
+    "vtep2": "192.168.0.220",
+    "vtep3": "192.168.0.230"
 }
 
 
@@ -138,16 +108,9 @@ def config_vtep(vtep_name, vtep, vtep_ip, svi_pip):
     """
     Create the bond/vxlan-bridge on the TOR which acts as VTEP and EPN-PE
     """
-
     # create l2vni, bridge and associated SVI
     config_l2vni(vtep_name, vtep, svi_pip, vtep_ip)
 
-    # create hostbonds and add them to the bridge
-    vtep_id = vtep_name.split("vtep")[1]
-    sys_mac = "44:38:39:ff:ff:0" + vtep_id
-
-    bond_member = vtep_name + "-eth2"
-    config_bond(vtep, "hostbond1", [bond_member], sys_mac, "br1000")
 
 def config_vteps(tgen, vteps):
     for vtep_name in vteps:
@@ -155,36 +118,31 @@ def config_vteps(tgen, vteps):
         config_vtep(vtep_name, vtep, vtep_ips.get(vtep_name), svi_ips.get(vtep_name))
 
 def compute_host_ip_mac(host_name):
-    host_id = host_name.split("host")[1]
-    host_ip = "192.168.0." + host_id + "0/24"
-    host_mac = "00:00:00:00:00:0" + host_id
+    host_id = host_name.split("dummy")[1]
+    host_ip = "192.168.0." + host_id + "/24"
+    host_mac = "00:00:00:00:00:" + host_id
     return host_ip, host_mac
 
-def config_host(host_name, host):
+def config_host(dummy_name, vtep):
     """
     Create the dual-attached bond on host nodes for MH
     """
 
-    bond_members = []
-    bond_members.append(host_name + "-eth0")
+    dummy_ip, dummy_mac = compute_host_ip_mac(dummy_name)
 
-    # Name of the bonded interface to be created on the host
-    bond_name = "vtepbond"
-
-    # Call a helper function to configure the bond on the host
-    config_bond(host, bond_name, bond_members, "00:00:00:00:00:00", None)
-
-    host_ip, host_mac = compute_host_ip_mac(host_name)
-
-    # Assign the computed IP address and MAC address to the bonded interface
-    host.run("ip addr add %s dev %s" % (host_ip, bond_name))
-    host.run("ip link set dev %s address %s" % (bond_name, host_mac))
+    vtep.run(f"ip link add name {dummy_name} type dummy")
+    vtep.run(f"ip link set dev {dummy_name} address {dummy_mac}")
+    vtep.run(f"ip link set dev {dummy_name} up")
+    vtep.run(f"ip addr add {dummy_ip} dev {dummy_name}")
+    vtep.run(f"ip link set {dummy_name} master br1000")
 
 
-def config_hosts(tgen, hosts):
-    for host_name in hosts:
-        host = tgen.gears[host_name]
-        config_host(host_name, host)
+def config_hosts(tgen, dummyhosts, vteps):
+    num_vteps = len(vteps)
+    for i, dummy_name in enumerate(dummyhosts):
+        vtep_name = vteps[i % num_vteps]  # cycle through vteps
+        vtep = tgen.gears[vtep_name]
+        config_host(dummy_name, vtep)
 
 # Function we pass to Topogen to create the topology
 def build_topo(tgen):
@@ -198,10 +156,6 @@ def build_topo(tgen):
     vtep2 = tgen.add_router("vtep2")
     vtep3 = tgen.add_router("vtep3")
 
-    host1 = tgen.add_router("host1")
-    host2 = tgen.add_router("host2")
-    host3 = tgen.add_router("host3")
-
     # Create a p2p connection between r1 and r2
     tgen.add_link(spine1, vtep1)
     tgen.add_link(spine1, vtep2)
@@ -210,10 +164,6 @@ def build_topo(tgen):
     tgen.add_link(spine2, vtep1)
     tgen.add_link(spine2, vtep2)
     tgen.add_link(spine2, vtep3)
-
-    tgen.add_link(vtep1, host1)
-    tgen.add_link(vtep2, host2)
-    tgen.add_link(vtep3, host3)
 
 
 # New form of setup/teardown using pytest fixture
@@ -236,11 +186,8 @@ def tgen(request):
     vteps.append("vtep3")
     config_vteps(tgen, vteps)
 
-    hosts = []
-    hosts.append("host1")
-    hosts.append("host2")
-    hosts.append("host3")
-    config_hosts(tgen, hosts)
+    dummyhosts = [f"dummy{i}" for i in range(1, 10)]
+    config_hosts(tgen, dummyhosts, vteps)
 
     router_list = tgen.routers()
     for rname, router in router_list.items():
@@ -269,74 +216,74 @@ def skip_on_failure(tgen):
 # ===================
 # The tests functions
 # ===================
+def start_background_ping(host, target_ip):
+    """
+    Start continuous ping in the background. Returns the PID of the ping.
+    """
+    # -D prints timestamp, very helpful for debugging mobility events.
+    cmd = f"ping -i 0.1 -D {target_ip} > /tmp/ping_output.log 2>&1 & echo $!"
+    pid = host.run(cmd).strip()
+    return pid
+
+def stop_background_ping(host, pid):
+    host.run(f"kill {pid} || true")
+
 
 def test_host_movement(tgen):
 
+    """
+    Test host movement between two TORs only a single host can move to a vtep at a time, the vtepbond interface can only hold 1 MAC address.
+    The MAC address in the previous host do not have to be removed as sequence number is increased at the new vtep, so previous vtep will forward traffic to that new vtep that holds the host.
+    This means that we cannot freely move both host1 and host2 to vtep1 at the same time as they will have the same MAC address on the same vtep bond interface.
+    """
+    
     # If any router has previously failed in another test, skip this one.
     if tgen.routers_have_failure():
         pytest.skip(f"skipped because of previous test failure\n {tgen.errors}")
 
-    # ----------------------------------------------------------------------
-    # Inner function: checks if OSPFv2 neighbor adjacency is FULL.
-    # ----------------------------------------------------------------------
-    def move_host_from(curr_hostname, target_hostname, targeted_ip, targeted_mac):
-        # for host_name in hosts:
-        curr_host = tgen.gears[curr_hostname]
-        target_host = tgen.gears[target_hostname]
+    vtep_dummy_map = {}
+    vteps = ["vtep1", "vtep2", "vtep3"]
+    dummyhosts = [f"dummy{i}" for i in range(1, 10)]
+    num_vteps = len(vteps)
+    for i, dummy_name in enumerate(dummyhosts):
+        vtep_name = vteps[i % num_vteps]  # cycle through vteps
+        vtep_dummy_map[dummy_name] = vtep_name
+    # print(initial_vtep_dummy_map)
+    pid = start_background_ping(tgen.gears["vtep2"], "192.168.0.3")
+    sleep(2)  # wait for some pings to be sent
+    print(tgen.gears["vtep2"].run("ip -s link show vni1000"))
+    def move_host_from(curr_hostname, target_hostname, targeted_dummy):
+        # Re assign the host to the new vtep in the map
+        vtep_dummy_map[targeted_dummy] = target_hostname
 
-        def change_addresses(bond_name, targeted_ip):
-            """
-            Move the host to a different interface to simulate failover
-            """
-
-            # Add the removal of the host_ip from the previous owner. So that the previous owner does not contain the IP anymore.
-            curr_host.run(f"ip addr del {targeted_ip}/24 dev {bond_name}")
-
-            target_host.run(f"ip addr add {targeted_ip} dev {bond_name}")
-            target_host.run(f"ip link set dev {bond_name} address {targeted_mac}")
-            target_host.run("ip neigh flush all")
+        # Get vtep nodes
+        curr_vtep = tgen.gears[curr_hostname]
+        target_vtep = tgen.gears[target_hostname]
 
         def run_command_and_expect():
-            # Run the FRRouting command via vtysh, output in JSON format.
-            # Example command: `show evpn mac vni 1000 json`
-            # Verify the connection has changed using vtep1
-            output_before = tgen.gears["vtep1"].vtysh_cmd("show evpn mac vni 1000 json", isjson=True)
-
-            print(f"Before movement FDB:\n{output_before}")
-            change_addresses("vtepbond", targeted_ip)
-            # initial_host2 = host2
-
-            output_after = tgen.gears["vtep1"].vtysh_cmd("show evpn mac vni 1000 json", isjson=True)
-            print(f"After movement FDB:\n{output_after}")
-
-            if topotest.json_cmp(output_before["macs"][targeted_mac]["type"], output_after["macs"][targeted_mac]["type"]) is None:
-                # Return None to indicate success (the neighbor is FULL).
-                return None
-            else:
-                if output_after["macs"][host1_mac]["type"] != "remote":
-                    if topotest.json_cmp(output_before["macs"][targeted_mac]["remoteVtep"], output_after["macs"][targeted_mac]["remoteVtep"]) is None:
-                        return None
-            # Otherwise, return the diff (meaning not yet FULL).
-            return topotest.json_cmp(output_before["macs"][targeted_mac]["type"], output_after["macs"][targeted_mac]["type"])
-
-        # ------------------------------------------------------------------
-        # Keep retrying the check until it succeeds or times out.
-        # ------------------------------------------------------------------
+            # Delete dummy from previous owner and assign it to the new one
+            config_host(targeted_dummy, target_vtep)
+            curr_vtep.run(f"ip link delete {targeted_dummy}")
+            return True
+        
         _, result = topotest.run_and_expect(
             run_command_and_expect,
-            None,   # EXPECTED OUTPUT
-            count=0,  # Try up to 30 times...
-            wait=1     # ...waiting 1 second between tries.
+            True,   # EXPECTED OUTPUT
+            count=5,  # Try up to 30 times...
+            wait=3     # ...waiting 1 second between tries.
         )
-
+        
+        sleep(1)  # wait for some pings to be sent
+        print(tgen.gears["vtep2"].run("ip -s link show vni1000"))
         # If the result is not None after all retries, OSPF didn't converge.
         assertmsg = (
             f"The MAC and IP address in {curr_hostname} has not moved\n"
         )
-        assert result is None, assertmsg
 
-    move_host_from("host1","host2", "192.168.0.10", "00:00:00:00:00:01")
-
+        assert result is True, assertmsg
+    
+    move_host_from(vtep_dummy_map["dummy3"], "vtep2", "dummy3")
+    stop_background_ping(tgen.gears["vtep2"], pid)
 
 def test_get_version(tgen):
     "Test the logs the FRR version"
