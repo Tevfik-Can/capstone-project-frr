@@ -105,7 +105,7 @@ def config_l2vni(vtep_name, node, svi_ip, vtep_ip):
     # node.run("ip link set br1000 master vrf500")
     node.run("ip addr add %s/24 dev br1000" % svi_ip)
     # NOTE TO SELF: Is this the any gateway address for hosts to reach: 
-    node.run("ip addr add 192.168.0.1/24 dev br1000")
+    node.run("ip addr add 192.168.0.250/24 dev br1000")
     node.run("/sbin/sysctl net.ipv4.conf.br1000.arp_accept=1")
 
     node.run(
@@ -137,11 +137,10 @@ svi_ips = {
     "vtep4": "192.168.0.254"
 }
 
-dummy_to_host_map = {
-    "dummy1": "host1",
-    "dummy2": "host2",
-    "dummy3": "host3"
-}
+dummy_to_host_map = {}
+# Change this value to increase/decrease number of dummy hosts created
+# This number of dummy interfaces will be divided among host1, host2, and host3
+number_of_dummy=50
 
 def config_vtep(vtep_name, vtep, vtep_ip, svi_pip):
     """
@@ -165,7 +164,7 @@ def config_vteps(tgen, vteps):
 
 def compute_host_ip_mac(host_name):
     host_id = host_name.split("host")[1]
-    host_ip = "192.168.0.2" + host_id + "0/24"
+    host_ip = "192.168.0.24" + host_id + "/24"
     host_mac = "00:00:00:00:00:0" + host_id
     return host_ip, host_mac
 
@@ -195,8 +194,8 @@ def config_hosts(tgen, hosts):
 
 def compute_dummy_ip_mac(dummy_name):
     dummy_id = dummy_name.split("dummy")[1]
-    dummy_ip = "192.168.0." + dummy_id + "9/24"
-    dummy_mac = "00:00:00:00:ff:" + dummy_id
+    dummy_ip = "192.168.0." + dummy_id + "/24"
+    dummy_mac = f"00:00:00:00:ff:{int(dummy_id):02x}"
     return dummy_ip, dummy_mac
 
 def config_dummy(dummy_name, host):
@@ -272,9 +271,13 @@ def tgen(request):
     hosts.append("host4") # Controller
     config_hosts(tgen, hosts)
 
-    config_dummy("dummy1", tgen.gears["host1"] )
-    config_dummy("dummy2", tgen.gears["host2"] )
-    config_dummy("dummy3", tgen.gears["host3"] )
+    for i in range(1,number_of_dummy+1):
+        select_host = "host" + str((i % 3) + 1)
+        dummy_to_host_map["dummy" + str(i)] = select_host
+        config_dummy("dummy" + str(i), tgen.gears[select_host] )
+    # config_dummy("dummy1", tgen.gears["host1"] )
+    # config_dummy("dummy2", tgen.gears["host2"] )
+    # config_dummy("dummy3", tgen.gears["host3"] )
     
     router_list = tgen.routers()
     for rname, router in router_list.items():
@@ -400,10 +403,10 @@ def test_host_movement(tgen):
     
     sleep(5)
     # start_background_iperf3("host1","192.168.0.19","host3")
-    pid_capture = start_packet_capture("vtep1", "192.168.0.19")
-    pid1 = start_background_ping("host4", "192.168.0.19")
-    pid2 = start_background_ping("host4", "192.168.0.29")
-    pid3 = start_background_ping("host4", "192.168.0.39")
+    pid_capture = start_packet_capture("vtep1", "192.168.0.1")
+    pid1 = start_background_ping("host4", "192.168.0.1")
+    pid2 = start_background_ping("host4", "192.168.0.2")
+    pid3 = start_background_ping("host4", "192.168.0.3")
     sleep(1)
     # sleep(2)  # wait for some pings to be sent
     
@@ -455,9 +458,9 @@ def test_host_movement(tgen):
     # sleep(2)
     # move_host_from(dummy_to_host_map["dummy3"], "host2", "dummy3")
     hosts = ["host1", "host2", "host3"]
-
+    
     for i in range(1000):
-        select_dummy = "dummy" + str((i % 3) + 1)
+        select_dummy = "dummy" + str((i % number_of_dummy) + 1)
         current_host = dummy_to_host_map[select_dummy]
         # Randomly select target_host different from current_host
         possible_targets = [h for h in hosts if h != current_host]
