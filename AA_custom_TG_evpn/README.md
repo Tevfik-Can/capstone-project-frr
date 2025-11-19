@@ -88,20 +88,23 @@ a6:88:1e:7f:8a:49 remote       20.20.20.20                          0/0
 --- Host movement test starting ---
 1763406826.9102464
 
-Number of MACs (local and remote) known for this VNI: 11
+Number of MACs (local and remote) known for this VNI: 13
 Flags: N=sync-neighs, I=local-inactive, P=peer-active, X=peer-proxy
 MAC               Type   Flags Intf/Remote ES/VTEP            VLAN  Seq #'s
 00:00:00:00:00:01 local        hostbond1                            0/0
-8e:bb:42:99:02:32 remote       20.20.20.20                          0/0
-00:00:00:00:ff:03 remote       30.30.30.30                          0/0
-a6:88:1e:7f:8a:49 remote       20.20.20.20                          0/0
-00:00:00:00:ff:01 local        hostbond1                            0/0
+ee:58:de:7b:f2:04 remote       20.20.20.20                          0/0
+00:00:00:00:ff:03 remote       20.20.20.20                          209/210
+00:00:00:00:00:04 remote       40.40.40.40                          0/0
+00:00:00:00:ff:01 remote       20.20.20.20                          215/217
+6e:bf:a2:bb:e9:49 remote       30.30.30.30                          0/0
 00:00:00:00:00:02 remote       20.20.20.20                          0/0
-56:14:71:ca:79:02 local        hostbond1                            0/0
-56:3f:a0:77:26:82 remote       30.30.30.30                          0/0
+ce:3e:76:e5:f1:06 remote       20.20.20.20                          0/0
+ea:33:23:d4:a0:67 remote       40.40.40.40                          0/0
+6a:65:8c:fb:50:6e local        br1000                         1000  0/0
+00:00:00:00:ff:02 local        hostbond1                            206/205
 00:00:00:00:00:03 remote       30.30.30.30                          0/0
-00:00:00:00:ff:02 remote       20.20.20.20                          0/0
-2a:d7:78:95:3e:34 local        br1000                         1000  0/0
+82:17:55:ae:73:17 local        hostbond1                            0/0
+
 
 --- Host moved to host2 ---
 1763406826.966382

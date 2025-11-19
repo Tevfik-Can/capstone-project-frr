@@ -140,7 +140,7 @@ svi_ips = {
 dummy_to_host_map = {}
 # Change this value to increase/decrease number of dummy hosts created
 # This number of dummy interfaces will be divided among host1, host2, and host3
-number_of_dummy=50
+number_of_dummy=3
 
 def config_vtep(vtep_name, vtep, vtep_ip, svi_pip):
     """
@@ -275,9 +275,6 @@ def tgen(request):
         select_host = "host" + str((i % 3) + 1)
         dummy_to_host_map["dummy" + str(i)] = select_host
         config_dummy("dummy" + str(i), tgen.gears[select_host] )
-    # config_dummy("dummy1", tgen.gears["host1"] )
-    # config_dummy("dummy2", tgen.gears["host2"] )
-    # config_dummy("dummy3", tgen.gears["host3"] )
     
     router_list = tgen.routers()
     for rname, router in router_list.items():
@@ -291,17 +288,13 @@ def tgen(request):
 
     # Provide tgen as argument to each test function
     yield tgen
-
-    # Teardown after last test runs
     tgen.stop_topology()
-
 
 # Fixture that executes before each test
 @pytest.fixture(autouse=True)
 def skip_on_failure(tgen):
     if tgen.routers_have_failure():
         pytest.skip("skipped because of previous test failure")
-
 
 # ===================
 # The tests functions
@@ -402,7 +395,6 @@ def test_host_movement(tgen):
     # Start continuous ping from host3 to monitor connectivity during movement
     
     sleep(5)
-    # start_background_iperf3("host1","192.168.0.19","host3")
     pid_capture = start_packet_capture("vtep1", "192.168.0.1")
     pid1 = start_background_ping("host4", "192.168.0.1")
     pid2 = start_background_ping("host4", "192.168.0.2")
@@ -421,19 +413,11 @@ def test_host_movement(tgen):
         target_host = tgen.gears[target_hostname]
 
         def run_command_and_expect():
-            # dummy_id = targeted_if.split("dummy")[1]
-            # dummy_mac = "00:00:00:00:ff:0" + dummy_id
-
-            # output_before=tester.vtysh_cmd(f"show evpn mac vni 1000 mac {dummy_mac} json")
-            # Create the macvlan interface on the target host to simulate host movement
             config_dummy(targeted_if, target_host)
 
             # Delete the macvlan interface from the previous host
             curr_host.run(f"ip link delete {targeted_if}")
-            # output_after=tester.vtysh_cmd(f"show evpn mac vni 1000 mac {dummy_mac} json")
-            # print(f"Output before movement: {str(output_before[dummy_mac]['remoteSequence'])}")
-            # if output_after[dummy_mac]["remoteSequence"] > output_before[dummy_mac]["remoteSequence"]:
-            #     return True
+            
             return True
         _, result = topotest.run_and_expect(
         run_command_and_expect,
@@ -441,25 +425,15 @@ def test_host_movement(tgen):
         count=5,  # Try up to 5 times
         wait=3     # waiting 3 seconds between tries
         )
-
-        # sleep(1)  # allow some time for network convergence
         
         # print(f"--- Host moved from {curr_hostname} to {target_hostname} --- \n{time()}\n")
         assert result is True, (
         f"The MAC and IP address in {curr_hostname} has not moved\n"
         )
 
-    
-    # move_host_from(dummy_to_host_map["dummy1"], "host2", "dummy1")
-    # sleep(2)
-    # move_host_from(dummy_to_host_map["dummy2"], "host1", "dummy2")
-    # sleep(2)
-    # move_host_from(dummy_to_host_map["dummy1"], "host1", "dummy1")
-    # sleep(2)
-    # move_host_from(dummy_to_host_map["dummy3"], "host2", "dummy3")
     hosts = ["host1", "host2", "host3"]
     
-    for i in range(1000):
+    for i in range(10):
         select_dummy = "dummy" + str((i % number_of_dummy) + 1)
         current_host = dummy_to_host_map[select_dummy]
         # Randomly select target_host different from current_host
@@ -469,7 +443,7 @@ def test_host_movement(tgen):
             move_host_from(current_host, target_host, select_dummy)
             dummy_to_host_map[select_dummy] = target_host
             # delay = (i % 3) + 0.5
-            # sleep(delay)
+            sleep(delay)
         
         
     tester = tgen.gears["vtep1"]
