@@ -18,10 +18,12 @@ import re
 import sys
 import pdb
 import random
+import json
 from functools import partial
 from time import sleep, time
 import platform
 import pytest
+
 
 # Save the Current Working Directory to find configuration files.
 CWD = os.path.dirname(os.path.realpath(__file__))
@@ -306,30 +308,17 @@ def start_background_ping(host_name, target_ip):
     tgen = get_topogen()
     host = tgen.gears[host_name]
     # -D prints timestamp, very helpful for debugging mobility events.
-    cmd = f"ping -i 0.1 -D {target_ip} > /tmp/ping_output_{host_name}_to_{target_ip}.log 2>&1 & echo $!"
+    cmd = f"ping -i 0.1 -D {target_ip} > /tmp/outputs/ping_output_{host_name}_to_{target_ip}.log 2>&1 & echo $!"
     pid = host.run(cmd).strip()
     return pid
 
-# def start_background_iperf3(server_name, target_ip, client_name):
-#     """
-#     Start continuous ping in the background. Returns the PID of the ping.
-#     """
-#     tgen = get_topogen()
-#     server = tgen.gears[server_name]
-#     client = tgen.gears[client_name]
-#     cmd = f'iperf3 -s > /tmp/iperf3_server_{server_name}.log 2>&1 & echo $!'
-#     pid_server = server.run(cmd).strip()
-
-#     cmd = f"iperf3 -c {target_ip} -i 0.1 > /tmp/iperf3_client_{client_name}_to_{target_ip}.log 2>&1 & echo $!"
-#     pid_client = client.run(cmd).strip()
-
-def start_packet_capture(server_name, target_ip):
+def start_packet_capture(server_name, capture_name='evpn_bgp_test_noname.pcap'):
     """
     Start continuous ping in the background. Returns the PID of the ping.
     """
     tgen = get_topogen()
     server = tgen.gears[server_name]
-    cmd = 'sudo tcpdump -ni any \( port 179 or icmp \) -w /tmp/evpn_bgp_test1.pcap > /dev/null 2>&1 & echo $!'
+    cmd = f"sudo tcpdump -ni any '( port 179 or icmp )' -w /tmp/outputs/{capture_name} > /dev/null 2>&1 & echo $!"
     pid = server.run(cmd).strip()
     return pid
 
@@ -337,8 +326,7 @@ def stop_background_ping(host_name, pid):
     tgen = get_topogen()
     host = tgen.gears[host_name]
     if host_name == "vtep1":
-        cmd = 'tmux send-keys -t capture C-c'
-        host.run(cmd)
+        host.run(f"kill {pid}")
     else:
         host.run(f"kill -2 {pid} || true")
 
@@ -346,36 +334,6 @@ def stop_background_ping(host_name, pid):
 def test_host_movement(tgen):
 
     """
-    sudo tcpdump -ni any port 179 -w /tmp/evpn_bgp.pcap
-
-    ip link delete dummy1
-
-    ip link add link vtepbond name dummy1 type macvlan mode bridge
-    ip link set dev dummy1 address 00:00:00:00:ff:01
-    ip addr add 192.168.0.19/24 dev dummy1
-    ip link set dev dummy1 up
-    
-    vtep4# show evpn mac vni 1000 mac 00:00:00:00:ff:01 json
-{
-  "00:00:00:00:ff:01":{
-    "type":"remote",
-    "remoteVtep":"10.10.10.10",
-    "uptime":"00:00:21",
-    "localSequence":0,
-    "remoteSequence":0,
-    "detectionCount":0,
-    "isDuplicate":false,
-    "syncNeighCount":0,
-    "neighbors":{
-      "active":[
-        "192.168.0.19"
-      ],
-      "inactive":[
-      ]
-    }
-  }
-}
-
     Test host movement between two TORs using macvlan interfaces.
     Only a single host can move to a VTEP at a time, because the vtepbond
     interface can only hold one MAC address per macvlan interface.
@@ -390,76 +348,107 @@ def test_host_movement(tgen):
         pytest.skip(f"skipped because of previous test failure\n {tgen.errors}")
     
     tester = tgen.gears["vtep4"]
-    print(tester.vtysh_cmd("show evpn mac vni 1000"))
+    # print(tester.vtysh_cmd("show evpn mac vni 1000"))
     # pdb.set_trace()
     # Start continuous ping from host3 to monitor connectivity during movement
     
-    sleep(5)
-    pid_capture = start_packet_capture("vtep1", "192.168.0.1")
-    pid1 = start_background_ping("host4", "192.168.0.1")
-    pid2 = start_background_ping("host4", "192.168.0.2")
-    pid3 = start_background_ping("host4", "192.168.0.3")
-    sleep(1)
-    # sleep(2)  # wait for some pings to be sent
-    
+    hosts = ["host1", "host2", "host3"]
+    delay_data = {}
+    movement_details = []
 
-    def move_host_from(curr_hostname, target_hostname, targeted_if):
-        # print(f"--- {targeted_if} movement test starting --- \n{time()}\n")
-        # Update mapping to reflect that the macvlan interface is now assigned to the new host
+    def move_host_from(targeted_if,delay=0):
+        
+        sleep(delay)
+        raw = tester.vtysh_cmd("show evpn mac vni 1000 mac 00:00:00:00:ff:01 json")
+        parsed = json.loads(raw)
+        
+        if delay not in delay_data:
+            delay_data[delay] = []
+        delay_data[delay].append(parsed)
+        
+        # Get the current host name and randomly select a different target host
+        current_hostname = dummy_to_host_map[targeted_if]
+        possible_targets = [h for h in hosts if h != current_hostname]
+        target_hostname = random.choice(possible_targets)
+        # target_hostname = "host1"  # Forcing movement to host2 for easier debugging
         dummy_to_host_map[targeted_if] = target_hostname
+        movement_details.append({
+            "time": time(),
+            "interface": targeted_if,
+            "from": current_hostname,
+            "to": target_hostname,
+            "delay": delay
+        })
 
         # Get the current and target host nodes
-        curr_host = tgen.gears[curr_hostname]
+        curr_host = tgen.gears[current_hostname]
         target_host = tgen.gears[target_hostname]
 
         def run_command_and_expect():
             config_dummy(targeted_if, target_host)
-
             # Delete the macvlan interface from the previous host
             curr_host.run(f"ip link delete {targeted_if}")
             
             return True
+
         _, result = topotest.run_and_expect(
         run_command_and_expect,
         True,   # EXPECTED OUTPUT
         count=5,  # Try up to 5 times
         wait=3     # waiting 3 seconds between tries
         )
-        
+
         # print(f"--- Host moved from {curr_hostname} to {target_hostname} --- \n{time()}\n")
         assert result is True, (
         f"The MAC and IP address in {curr_hostname} has not moved\n"
         )
 
-    hosts = ["host1", "host2", "host3"]
-    
-    for i in range(10):
-        select_dummy = "dummy" + str((i % number_of_dummy) + 1)
-        current_host = dummy_to_host_map[select_dummy]
-        # Randomly select target_host different from current_host
-        possible_targets = [h for h in hosts if h != current_host]
-        target_host = random.choice(possible_targets)
-        if target_host != current_host:
-            move_host_from(current_host, target_host, select_dummy)
-            dummy_to_host_map[select_dummy] = target_host
-            # delay = (i % 3) + 0.5
-            sleep(delay)
-        
-        
-    tester = tgen.gears["vtep1"]
-    print(tester.vtysh_cmd("show evpn mac vni 1000"))
     sleep(5)
+    pid_capture1 = start_packet_capture("vtep1", "vtep1_various_delays.pcap")
+    # pid_capture2 = start_packet_capture("vtep2", "vtep2_various_delays.pcap")
+    # pid_capture3 = start_packet_capture("vtep3", "vtep3_various_delays.pcap")
+    # pid_capture4 = start_packet_capture("vtep4", "vtep4_various_delays.pcap")
+    pid1 = start_background_ping("host4", "192.168.0.1")
+    # pid2 = start_background_ping("host4", "192.168.0.2")
+    # pid3 = start_background_ping("host4", "192.168.0.3")
+    sleep(5)  # wait for some pings to be sent
+
+    delays = [2, 1, 0.8, 0.5, 0.2, 0.1, 0]
+    # delays = [0]
+    moves = 10
+
+    # delays = [1]
+    for delay in delays:
+        for i in range(moves):
+            # select_dummy = "dummy" + str((i % number_of_dummy) + 1)
+            select_dummy = "dummy1"
+            move_host_from(select_dummy,delay)
+        sleep(5)
+    
+    sleep(10)
+        
+    # tester = tgen.gears["vtep1"]
+    # print(tester.vtysh_cmd("show evpn mac vni 1000"))
+    # sleep(5)
     stop_background_ping("host4", pid1)
-    stop_background_ping("host4", pid2)
-    stop_background_ping("host4", pid3)
-    stop_background_ping("vtep1", pid_capture)
+    # stop_background_ping("host4", pid2)
+    # stop_background_ping("host4", pid3)
+    stop_background_ping("vtep1", pid_capture1)
+    # stop_background_ping("vtep2", pid_capture2)
+    # stop_background_ping("vtep3", pid_capture3)
+    # stop_background_ping("vtep4", pid_capture4)
+    with open("/tmp/outputs/evpn_show_results.json", "w") as f:
+        json.dump(delay_data, f, indent=2)
+    with open("/tmp/outputs/movement_details.json", "w") as f:
+        json.dump(movement_details, f, indent=2)
+
 
 def test_get_version(tgen):
     "Test the logs the FRR version"
 
     r1 = tgen.gears["vtep1"]
     version = r1.vtysh_cmd("show evpn mac vni 1000")
-    logger.info("=-=-=-=-=-==-FRR version is: " + version)
+    # logger.info("=-=-=-=-=-==-FRR version is: " + version)
 
 if __name__ == "__main__":
     args = ["-s"] + sys.argv[1:]
