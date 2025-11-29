@@ -142,7 +142,7 @@ svi_ips = {
 dummy_to_host_map = {}
 # Change this value to increase/decrease number of dummy hosts created
 # This number of dummy interfaces will be divided among host1, host2, and host3
-number_of_dummy=3
+number_of_dummy=6
 
 def config_vtep(vtep_name, vtep, vtep_ip, svi_pip):
     """
@@ -274,7 +274,7 @@ def tgen(request):
     config_hosts(tgen, hosts)
 
     for i in range(1,number_of_dummy+1):
-        select_host = "host" + str((i % 3) + 1)
+        select_host = "host" + str(((i-1) % 3)+1)
         dummy_to_host_map["dummy" + str(i)] = select_host
         config_dummy("dummy" + str(i), tgen.gears[select_host] )
     
@@ -318,7 +318,7 @@ def start_packet_capture(server_name, capture_name='evpn_bgp_test_noname.pcap'):
     """
     tgen = get_topogen()
     server = tgen.gears[server_name]
-    cmd = f"sudo tcpdump -ni any '( port 179 or icmp )' -w /tmp/outputs/{capture_name} > /dev/null 2>&1 & echo $!"
+    cmd = f"sudo tcpdump -ni any 'port 179' -w /tmp/outputs/{capture_name} > /dev/null 2>&1 & echo $!"
     pid = server.run(cmd).strip()
     return pid
 
@@ -388,7 +388,6 @@ def test_host_movement(tgen):
             config_dummy(targeted_if, target_host)
             # Delete the macvlan interface from the previous host
             curr_host.run(f"ip link delete {targeted_if}")
-            
             return True
 
         _, result = topotest.run_and_expect(
@@ -404,17 +403,18 @@ def test_host_movement(tgen):
         )
 
     sleep(5)
-    pid_capture1 = start_packet_capture("vtep1", "vtep1_various_delays.pcap")
+    pid_capture1 = start_packet_capture("vtep1", "test.pcap")
+    # pid_capture2 = start_packet_capture("spine1", "spine1_capture_move_from_vtep2_to_vtep1.pcap")
     # pid_capture2 = start_packet_capture("vtep2", "vtep2_various_delays.pcap")
     # pid_capture3 = start_packet_capture("vtep3", "vtep3_various_delays.pcap")
     # pid_capture4 = start_packet_capture("vtep4", "vtep4_various_delays.pcap")
-    pid1 = start_background_ping("host4", "192.168.0.1")
+    # pid1 = start_background_ping("host4", "192.168.0.1")
     # pid2 = start_background_ping("host4", "192.168.0.2")
     # pid3 = start_background_ping("host4", "192.168.0.3")
     sleep(5)  # wait for some pings to be sent
 
-    delays = [2, 1, 0.8, 0.5, 0.2, 0.1, 0]
-    # delays = [0]
+    # delays = [2, 1, 0.8, 0.5, 0.2, 0.1, 0]
+    delays = [1]
     moves = 10
 
     # delays = [1]
@@ -425,15 +425,16 @@ def test_host_movement(tgen):
             move_host_from(select_dummy,delay)
         sleep(5)
     
-    sleep(10)
+    sleep(5)
         
     # tester = tgen.gears["vtep1"]
     # print(tester.vtysh_cmd("show evpn mac vni 1000"))
     # sleep(5)
-    stop_background_ping("host4", pid1)
+    # stop_background_ping("host4", pid1)
     # stop_background_ping("host4", pid2)
     # stop_background_ping("host4", pid3)
     stop_background_ping("vtep1", pid_capture1)
+    # stop_background_ping("spine1", pid_capture2)
     # stop_background_ping("vtep2", pid_capture2)
     # stop_background_ping("vtep3", pid_capture3)
     # stop_background_ping("vtep4", pid_capture4)
