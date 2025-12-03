@@ -128,21 +128,19 @@ def config_l2vni(vtep_name, node, svi_ip, vtep_ip):
 vtep_ips = {
     "vtep1": "10.10.10.10",
     "vtep2": "20.20.20.20",
-    "vtep3": "30.30.30.30",
-    "vtep4": "40.40.40.40"
+    "vtep3": "30.30.30.30"
 }
 
 svi_ips = {
     "vtep1": "192.168.0.251",
     "vtep2": "192.168.0.252",
-    "vtep3": "192.168.0.253",
-    "vtep4": "192.168.0.254"
+    "vtep3": "192.168.0.253"
 }
 
 dummy_to_host_map = {}
 # Change this value to increase/decrease number of dummy hosts created
 # This number of dummy interfaces will be divided among host1, host2, and host3
-number_of_dummy=6
+number_of_dummy=3
 
 def config_vtep(vtep_name, vtep, vtep_ip, svi_pip):
     """
@@ -221,28 +219,23 @@ def build_topo(tgen):
     vtep1 = tgen.add_router("vtep1")
     vtep2 = tgen.add_router("vtep2")
     vtep3 = tgen.add_router("vtep3")
-    vtep4 = tgen.add_router("vtep4")
-    
+
     host1 = tgen.add_router("host1")
     host2 = tgen.add_router("host2")
     host3 = tgen.add_router("host3")
-    host4 = tgen.add_router("host4")
 
     # Create a p2p connection between r1 and r2
     tgen.add_link(spine1, vtep1)
     tgen.add_link(spine1, vtep2)
     tgen.add_link(spine1, vtep3)
-    tgen.add_link(spine1, vtep4)
 
     tgen.add_link(spine2, vtep1)
     tgen.add_link(spine2, vtep2)
     tgen.add_link(spine2, vtep3)
-    tgen.add_link(spine2, vtep4)
 
     tgen.add_link(vtep1, host1)
     tgen.add_link(vtep2, host2)
     tgen.add_link(vtep3, host3)
-    tgen.add_link(vtep4, host4)
 
 
 # New form of setup/teardown using pytest fixture
@@ -263,14 +256,12 @@ def tgen(request):
     vteps.append("vtep1")
     vteps.append("vtep2")
     vteps.append("vtep3")
-    vteps.append("vtep4")
     config_vteps(tgen, vteps)
 
     hosts = []
     hosts.append("host1")
     hosts.append("host2")
     hosts.append("host3")
-    hosts.append("host4") # Controller
     config_hosts(tgen, hosts)
 
     for i in range(1,number_of_dummy+1):
@@ -347,8 +338,9 @@ def test_host_movement(tgen):
     if tgen.routers_have_failure():
         pytest.skip(f"skipped because of previous test failure\n {tgen.errors}")
     
-    tester = tgen.gears["vtep4"]
-    # print(tester.vtysh_cmd("show evpn mac vni 1000"))
+    tester = tgen.gears["vtep3"]
+    output = "/"
+    print(tester.vtysh_cmd("show evpn mac vni 1000"))
     # pdb.set_trace()
     # Start continuous ping from host3 to monitor connectivity during movement
     
@@ -397,9 +389,9 @@ def test_host_movement(tgen):
         wait=3     # waiting 3 seconds between tries
         )
 
-        # print(f"--- Host moved from {curr_hostname} to {target_hostname} --- \n{time()}\n")
+        print(f"--- Host moved from {current_hostname} to {target_hostname} at {time()} ---")
         assert result is True, (
-        f"The MAC and IP address in {curr_hostname} has not moved\n"
+        f"The MAC and IP address in {current_hostname} has not moved\n"
         )
 
     sleep(5)
@@ -428,7 +420,7 @@ def test_host_movement(tgen):
     sleep(5)
         
     # tester = tgen.gears["vtep1"]
-    # print(tester.vtysh_cmd("show evpn mac vni 1000"))
+    print(tester.vtysh_cmd("show evpn mac vni 1000"))
     # sleep(5)
     # stop_background_ping("host4", pid1)
     # stop_background_ping("host4", pid2)
