@@ -309,7 +309,7 @@ def start_packet_capture(server_name, capture_name='evpn_bgp_test_noname.pcap'):
     """
     tgen = get_topogen()
     server = tgen.gears[server_name]
-    cmd = f"sudo tcpdump -ni any 'port 179' -w /tmp/outputs/{capture_name} > /dev/null 2>&1 & echo $!"
+    cmd = f"sudo tcpdump -ni any '(port 179 or arp)' -ttt -w /tmp/outputs/{capture_name} > /dev/null 2>&1 & echo $!"
     pid = server.run(cmd).strip()
     return pid
 
@@ -321,6 +321,68 @@ def stop_background_ping(host_name, pid):
     else:
         host.run(f"kill -2 {pid} || true")
 
+def get_dummy_mac(dummy_name):
+    """Return the MAC associated with a dummy interface name."""
+    dummy_id = dummy_name.replace("dummy", "")
+    return f"00:00:00:00:ff:{int(dummy_id):02x}"
+
+def start_fdb_monitor_on_node(node, out_path="/tmp/outputs/fdb_vtep1_sorry6.txt", pid_path="/tmp/outputs/fdb_monitor.pid"):
+    """
+    Install and start a small Python script on the `node` that runs:
+        bridge monitor fdb
+    and prefixes each output line with a millisecond epoch timestamp.
+    The monitor runs in background via nohup and the PID is written to pid_path.
+    Returns the PID as a string (or None on failure).
+    """
+    # ensure outputs dir exists on node
+    try:
+        node.run("mkdir -p /tmp/outputs")
+    except Exception:
+        pass
+
+    # small python monitor script; write it to the node
+    monitor_py = r'''#!/usr/bin/env python3
+import subprocess, sys, time
+# Run bridge monitor fdb and prefix each line with ms epoch timestamp
+p = subprocess.Popen(["bridge", "monitor", "fdb"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+for ln in p.stdout:
+    try:
+        sys.stdout.write(f"{int(time.time()*1000)} {ln}")
+        sys.stdout.flush()
+    except Exception:
+        # on any error just continue to avoid monitor dying silently
+        pass
+'''
+    # write the script to node
+    node.run("cat > /tmp/outputs/fdb_monitor_vtep1.py <<'PY'\n" + monitor_py + "\nPY")
+    node.run("chmod +x /tmp/outputs/fdb_monitor_vtep1.py || true")
+
+    # start it in background with nohup, save pid
+    # echo pid into pid_path then output it so caller can capture
+    start_cmd = (
+        f"nohup python3 /tmp/outputs/fdb_monitor_vtep1.py >> {out_path} 2>&1 & echo $! > {pid_path} && cat {pid_path} || true"
+    )
+    try:
+        pid = node.run(start_cmd).strip()
+        if not pid:
+            return None
+        return pid
+    except Exception:
+        return None
+
+
+def stop_fdb_monitor_on_node(node, pid_path="/tmp/outputs/fdb_monitor.pid"):
+    """
+    Kill the monitor whose PID is saved in pid_path on the node (if present).
+    Removes pid file.
+    """
+    try:
+        out = node.run(f"test -f {pid_path} && cat {pid_path} || true").strip()
+        if out:
+            node.run(f"kill {out} || true")
+        node.run(f"rm -f {pid_path} || true")
+    except Exception:
+        pass
 
 def test_host_movement(tgen):
 
@@ -338,13 +400,13 @@ def test_host_movement(tgen):
     if tgen.routers_have_failure():
         pytest.skip(f"skipped because of previous test failure\n {tgen.errors}")
     
-    tester = tgen.gears["vtep3"]
+    tester = tgen.gears["vtep2"]
     output = "/"
     # print(tester.vtysh_cmd("show evpn mac vni 1000"))
     # pdb.set_trace()
     # Start continuous ping from host3 to monitor connectivity during movement
     
-    hosts = ["host1", "host2", "host3"]
+    hosts = ["host1", "host2"]
     delay_data = {}
     pre_movement_details = []
     after_movement_details = []
@@ -364,8 +426,10 @@ def test_host_movement(tgen):
         target_hostname = random.choice(possible_targets)
         # target_hostname = "host1"  # Forcing movement to host2 for easier debugging
         dummy_to_host_map[targeted_if] = target_hostname
+        move_ts_ms = int(time() * 1000)
+        dummy_mac = get_dummy_mac(targeted_if)
         pre_movement_details.append({
-            "time": time(),
+            "time": move_ts_ms,
             "interface": targeted_if,
             "from": current_hostname,
             "to": target_hostname,
@@ -380,6 +444,15 @@ def test_host_movement(tgen):
             config_dummy(targeted_if, target_host)
             # Delete the macvlan interface from the previous host
             curr_host.run(f"ip link delete {targeted_if}")
+            move_ts_ms = int(time() * 1000)
+            dummy_mac = get_dummy_mac(targeted_if)
+            after_movement_details.append({
+                "time": move_ts_ms,
+                "interface": targeted_if,
+                "from": current_hostname,
+                "to": target_hostname,
+                "delay": delay
+            })
             return True
 
         _, result = topotest.run_and_expect(
@@ -388,13 +461,7 @@ def test_host_movement(tgen):
         count=5,  # Try up to 5 times
         wait=3     # waiting 3 seconds between tries
         )
-        after_movement_details.append({
-            "time": time(),
-            "interface": targeted_if,
-            "from": current_hostname,
-            "to": target_hostname,
-            "delay": delay
-        })
+        
 
         # print(f"--- Host moved from {current_hostname} to {target_hostname} at {time()} ---")
         assert result is True, (
@@ -403,18 +470,23 @@ def test_host_movement(tgen):
 
     sleep(5)
     pid_capture1 = start_packet_capture("vtep1", "vtep1_capture.pcap")
-    # pid_capture2 = start_packet_capture("spine1", "spine1_capture_move_from_vtep2_to_vtep1.pcap")
+    # # pid_capture2 = start_packet_capture("spine1", "spine1_capture_move_from_vtep2_to_vtep1.pcap")
     pid_capture2 = start_packet_capture("vtep2", "vtep2_capture.pcap")
     # pid_capture3 = start_packet_capture("vtep3", "vtep3_various_delays.pcap")
     # pid_capture4 = start_packet_capture("vtep4", "vtep4_various_delays.pcap")
     # pid1 = start_background_ping("host4", "192.168.0.1")
     # pid2 = start_background_ping("host4", "192.168.0.2")
     # pid3 = start_background_ping("host4", "192.168.0.3")
+    fdb_pid = start_fdb_monitor_on_node(tgen.gears["vtep1"], out_path="/tmp/outputs/fdb_vtep1.txt", pid_path="/tmp/outputs/fdb_monitor_vtep1.pid")
+    logger.info(f"Started FDB monitor on vtep1 with PID {fdb_pid}")
+    fdb_pid = start_fdb_monitor_on_node(tgen.gears["vtep2"], out_path="/tmp/outputs/fdb_vtep2.txt", pid_path="/tmp/outputs/fdb_monitor_vtep2.pid")
+    logger.info(f"Started FDB monitor on vtep2 with PID {fdb_pid}")
+    
     sleep(5)  # wait for some pings to be sent
 
     # delays = [2, 1, 0.8, 0.5, 0.2, 0.1, 0]
     delays = [1]
-    moves = 20
+    moves = 30
 
     # delays = [1]
     for delay in delays:
@@ -424,7 +496,7 @@ def test_host_movement(tgen):
             move_host_from(select_dummy,delay)
         sleep(5)
     
-    sleep(5)
+    sleep(15)
         
     # tester = tgen.gears["vtep1"]
     # print(tester.vtysh_cmd("show evpn mac vni 1000"))
@@ -433,10 +505,15 @@ def test_host_movement(tgen):
     # stop_background_ping("host4", pid2)
     # stop_background_ping("host4", pid3)
     stop_background_ping("vtep1", pid_capture1)
-    # stop_background_ping("spine1", pid_capture2)
+    # # stop_background_ping("spine1", pid_capture2)
     stop_background_ping("vtep2", pid_capture2)
     # stop_background_ping("vtep3", pid_capture3)
     # stop_background_ping("vtep4", pid_capture4)
+    stop_fdb_monitor_on_node(tgen.gears["vtep1"], pid_path="/tmp/outputs/fdb_monitor_vtep1.pid")
+    logger.info("Stopped FDB monitor on vtep1")
+    stop_fdb_monitor_on_node(tgen.gears["vtep2"], pid_path="/tmp/outputs/fdb_monitor_vtep2.pid")
+    logger.info("Stopped FDB monitor on vtep2")
+
     with open("/tmp/outputs/evpn_show_results.json", "w") as f:
         json.dump(delay_data, f, indent=2)
     with open("/tmp/outputs/pre_movement_details.json", "w") as f:
