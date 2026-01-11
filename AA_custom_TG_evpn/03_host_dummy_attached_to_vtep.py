@@ -105,9 +105,9 @@ def config_l2vni(vtep_name, node, svi_ip, vtep_ip):
     # Create a bridge br1000 and assign SVI IP
     node.run("ip link add br1000 type bridge")
     # node.run("ip link set br1000 master vrf500")
-    node.run("ip addr add %s/24 dev br1000" % svi_ip)
+    node.run("ip addr add %s/16 dev br1000" % svi_ip)
     # NOTE TO SELF: Is this the any gateway address for hosts to reach: 
-    node.run("ip addr add 192.168.0.250/24 dev br1000")
+    node.run("ip addr add 192.168.0.250/16 dev br1000")
     node.run("/sbin/sysctl net.ipv4.conf.br1000.arp_accept=1")
 
     node.run(
@@ -140,7 +140,7 @@ svi_ips = {
 dummy_to_host_map = {}
 # Change this value to increase/decrease number of dummy hosts created
 # This number of dummy interfaces will be divided among host1, host2, and host3
-number_of_dummy=3
+number_of_dummy=600
 
 def config_vtep(vtep_name, vtep, vtep_ip, svi_pip):
     """
@@ -164,7 +164,7 @@ def config_vteps(tgen, vteps):
 
 def compute_host_ip_mac(host_name):
     host_id = host_name.split("host")[1]
-    host_ip = "192.168.0.24" + host_id + "/24"
+    host_ip = "192.168.0.24" + host_id + "/16"
     host_mac = "00:00:00:00:00:0" + host_id
     return host_ip, host_mac
 
@@ -194,8 +194,18 @@ def config_hosts(tgen, hosts):
 
 def compute_dummy_ip_mac(dummy_name):
     dummy_id = dummy_name.split("dummy")[1]
-    dummy_ip = "192.168.0." + dummy_id + "/24"
-    dummy_mac = f"00:00:00:00:ff:{int(dummy_id):02x}"
+    # IP calculation: 192.168.(dummy_id // 256).(dummy_id % 256)
+    octet_3 = int(dummy_id) // 256
+    octet_4 = int(dummy_id) % 256
+    dummy_ip = f"192.168.{octet_3}.{octet_4}/16"
+
+    # MAC calculation: keep fixed prefix + last 2 bytes from dummy_id
+    # Using ff as the 5th byte as before, and last byte = dummy_id mod 256
+    # We can also encode dummy_id // 256 as the 4th byte for uniqueness
+    mac_byte_4 = octet_3  # 0-3
+    mac_byte_5 = 0xff     # fixed
+    mac_byte_6 = octet_4  # 0-255
+    dummy_mac = f"00:00:{mac_byte_4:02x}:00:{mac_byte_5:02x}:{mac_byte_6:02x}"
     return dummy_ip, dummy_mac
 
 def config_dummy(dummy_name, host):
@@ -356,7 +366,8 @@ for ln in p.stdout:
     # write the script to node
     node.run("cat > /tmp/outputs/fdb_monitor_vtep1.py <<'PY'\n" + monitor_py + "\nPY")
     node.run("chmod +x /tmp/outputs/fdb_monitor_vtep1.py || true")
-
+    # truncate the output file before starting the script
+    node.run(f"> {out_path}")
     # start it in background with nohup, save pid
     # echo pid into pid_path then output it so caller can capture
     start_cmd = (
@@ -384,6 +395,7 @@ def stop_fdb_monitor_on_node(node, pid_path="/tmp/outputs/fdb_monitor.pid"):
     except Exception:
         pass
 
+
 def test_host_movement(tgen):
 
     """
@@ -400,7 +412,6 @@ def test_host_movement(tgen):
     if tgen.routers_have_failure():
         pytest.skip(f"skipped because of previous test failure\n {tgen.errors}")
     
-    tester = tgen.gears["vtep2"]
     output = "/"
     # print(tester.vtysh_cmd("show evpn mac vni 1000"))
     # pdb.set_trace()
@@ -413,12 +424,6 @@ def test_host_movement(tgen):
     def move_host_from(targeted_if,delay=0):
         
         sleep(delay)
-        raw = tester.vtysh_cmd("show evpn mac vni 1000 mac 00:00:00:00:ff:01 json")
-        parsed = json.loads(raw)
-        
-        if delay not in delay_data:
-            delay_data[delay] = []
-        delay_data[delay].append(parsed)
         
         # Get the current host name and randomly select a different target host
         current_hostname = dummy_to_host_map[targeted_if]
@@ -426,15 +431,6 @@ def test_host_movement(tgen):
         target_hostname = random.choice(possible_targets)
         # target_hostname = "host1"  # Forcing movement to host2 for easier debugging
         dummy_to_host_map[targeted_if] = target_hostname
-        move_ts_ms = int(time() * 1000)
-        dummy_mac = get_dummy_mac(targeted_if)
-        pre_movement_details.append({
-            "time": move_ts_ms,
-            "interface": targeted_if,
-            "from": current_hostname,
-            "to": target_hostname,
-            "delay": delay
-        })
 
         # Get the current and target host nodes
         curr_host = tgen.gears[current_hostname]
@@ -446,13 +442,15 @@ def test_host_movement(tgen):
             curr_host.run(f"ip link delete {targeted_if}")
             move_ts_ms = int(time() * 1000)
             dummy_mac = get_dummy_mac(targeted_if)
-            after_movement_details.append({
-                "time": move_ts_ms,
-                "interface": targeted_if,
-                "from": current_hostname,
-                "to": target_hostname,
-                "delay": delay
-            })
+            if dummy_mac == "00:00:00:00:ff:01":
+                after_movement_details.append({
+                    "mac": dummy_mac,
+                    "time": move_ts_ms,
+                    "interface": targeted_if,
+                    "from": current_hostname,
+                    "to": target_hostname,
+                    "delay": delay
+                })
             return True
 
         _, result = topotest.run_and_expect(
@@ -461,7 +459,6 @@ def test_host_movement(tgen):
         count=5,  # Try up to 5 times
         wait=3     # waiting 3 seconds between tries
         )
-        
 
         # print(f"--- Host moved from {current_hostname} to {target_hostname} at {time()} ---")
         assert result is True, (
@@ -469,57 +466,173 @@ def test_host_movement(tgen):
         )
 
     sleep(5)
-    pid_capture1 = start_packet_capture("vtep1", "vtep1_capture.pcap")
-    # # pid_capture2 = start_packet_capture("spine1", "spine1_capture_move_from_vtep2_to_vtep1.pcap")
-    pid_capture2 = start_packet_capture("vtep2", "vtep2_capture.pcap")
-    # pid_capture3 = start_packet_capture("vtep3", "vtep3_various_delays.pcap")
-    # pid_capture4 = start_packet_capture("vtep4", "vtep4_various_delays.pcap")
-    # pid1 = start_background_ping("host4", "192.168.0.1")
-    # pid2 = start_background_ping("host4", "192.168.0.2")
-    # pid3 = start_background_ping("host4", "192.168.0.3")
-    fdb_pid = start_fdb_monitor_on_node(tgen.gears["vtep1"], out_path="/tmp/outputs/fdb_vtep1.txt", pid_path="/tmp/outputs/fdb_monitor_vtep1.pid")
-    logger.info(f"Started FDB monitor on vtep1 with PID {fdb_pid}")
-    fdb_pid = start_fdb_monitor_on_node(tgen.gears["vtep2"], out_path="/tmp/outputs/fdb_vtep2.txt", pid_path="/tmp/outputs/fdb_monitor_vtep2.pid")
-    logger.info(f"Started FDB monitor on vtep2 with PID {fdb_pid}")
+
+    fdb_pid = start_fdb_monitor_on_node(tgen.gears["vtep3"], out_path="/tmp/outputs/fdb_vtep3.txt", pid_path="/tmp/outputs/fdb_monitor_vtep3.pid")
+    logger.info(f"Started FDB monitor on vtep3 with PID {fdb_pid}")
     
     sleep(5)  # wait for some pings to be sent
 
     # delays = [2, 1, 0.8, 0.5, 0.2, 0.1, 0]
-    delays = [1]
-    moves = 30
+    delays = [0.01]
+    moves = 20 * number_of_dummy
 
     # delays = [1]
     for delay in delays:
         for i in range(moves):
-            # select_dummy = "dummy" + str((i % number_of_dummy) + 1)
-            select_dummy = "dummy1"
+            select_dummy = "dummy" + str((i % number_of_dummy) + 1)
+            # select_dummy = "dummy1"
             move_host_from(select_dummy,delay)
         sleep(5)
     
     sleep(15)
-        
-    # tester = tgen.gears["vtep1"]
-    # print(tester.vtysh_cmd("show evpn mac vni 1000"))
-    # sleep(5)
-    # stop_background_ping("host4", pid1)
-    # stop_background_ping("host4", pid2)
-    # stop_background_ping("host4", pid3)
-    stop_background_ping("vtep1", pid_capture1)
-    # # stop_background_ping("spine1", pid_capture2)
-    stop_background_ping("vtep2", pid_capture2)
-    # stop_background_ping("vtep3", pid_capture3)
-    # stop_background_ping("vtep4", pid_capture4)
-    stop_fdb_monitor_on_node(tgen.gears["vtep1"], pid_path="/tmp/outputs/fdb_monitor_vtep1.pid")
-    logger.info("Stopped FDB monitor on vtep1")
-    stop_fdb_monitor_on_node(tgen.gears["vtep2"], pid_path="/tmp/outputs/fdb_monitor_vtep2.pid")
-    logger.info("Stopped FDB monitor on vtep2")
 
-    with open("/tmp/outputs/evpn_show_results.json", "w") as f:
-        json.dump(delay_data, f, indent=2)
-    with open("/tmp/outputs/pre_movement_details.json", "w") as f:
-        json.dump(pre_movement_details, f, indent=2)
+    stop_fdb_monitor_on_node(tgen.gears["vtep3"], pid_path="/tmp/outputs/fdb_monitor_vtep3.pid")
+    logger.info("Stopped FDB monitor on vtep3")
+
     with open("/tmp/outputs/after_movement_details.json", "w") as f:
         json.dump(after_movement_details, f, indent=2)
+
+
+# def test_host_movement(tgen):
+
+#     """
+#     Test host movement between two TORs using macvlan interfaces.
+#     Only a single host can move to a VTEP at a time, because the vtepbond
+#     interface can only hold one MAC address per macvlan interface.
+#     When the host moves, the MAC address appears at the new VTEP with an
+#     updated sequence number, so the previous VTEP forwards traffic to the new VTEP.
+#     This means two hosts cannot be moved to the same VTEP simultaneously
+#     if they share the same MAC on the vtepbond interface.
+#     """
+
+#     # If any router has previously failed in another test, skip this one.
+#     if tgen.routers_have_failure():
+#         pytest.skip(f"skipped because of previous test failure\n {tgen.errors}")
+    
+#     tester = tgen.gears["vtep2"]
+#     output = "/"
+#     # print(tester.vtysh_cmd("show evpn mac vni 1000"))
+#     # pdb.set_trace()
+#     # Start continuous ping from host3 to monitor connectivity during movement
+    
+#     hosts = ["host1", "host2"]
+#     delay_data = {}
+#     pre_movement_details = []
+#     after_movement_details = []
+#     def move_host_from(targeted_if,delay=0):
+        
+#         sleep(delay)
+#         raw = tester.vtysh_cmd("show evpn mac vni 1000 mac 00:00:00:00:ff:01 json")
+#         parsed = json.loads(raw)
+        
+#         if delay not in delay_data:
+#             delay_data[delay] = []
+#         delay_data[delay].append(parsed)
+        
+#         # Get the current host name and randomly select a different target host
+#         current_hostname = dummy_to_host_map[targeted_if]
+#         possible_targets = [h for h in hosts if h != current_hostname and h != "host3"]
+#         target_hostname = random.choice(possible_targets)
+#         # target_hostname = "host1"  # Forcing movement to host2 for easier debugging
+#         dummy_to_host_map[targeted_if] = target_hostname
+#         move_ts_ms = int(time() * 1000)
+#         dummy_mac = get_dummy_mac(targeted_if)
+#         if dummy_mac == "00:00:00:00:ff:01":
+#             pre_movement_details.append({
+#                 "mac": dummy_mac,
+#                 "time": move_ts_ms,
+#                 "interface": targeted_if,
+#                 "from": current_hostname,
+#                 "to": target_hostname,
+#                 "delay": delay
+#             })
+
+#         # Get the current and target host nodes
+#         curr_host = tgen.gears[current_hostname]
+#         target_host = tgen.gears[target_hostname]
+
+#         def run_command_and_expect():
+#             config_dummy(targeted_if, target_host)
+#             # Delete the macvlan interface from the previous host
+#             curr_host.run(f"ip link delete {targeted_if}")
+#             move_ts_ms = int(time() * 1000)
+#             dummy_mac = get_dummy_mac(targeted_if)
+#             if dummy_mac == "00:00:00:00:ff:01":
+#                 after_movement_details.append({
+#                     "mac": dummy_mac,
+#                     "time": move_ts_ms,
+#                     "interface": targeted_if,
+#                     "from": current_hostname,
+#                     "to": target_hostname,
+#                     "delay": delay
+#                 })
+#             return True
+
+#         _, result = topotest.run_and_expect(
+#         run_command_and_expect,
+#         True,   # EXPECTED OUTPUT
+#         count=5,  # Try up to 5 times
+#         wait=3     # waiting 3 seconds between tries
+#         )
+        
+
+#         # print(f"--- Host moved from {current_hostname} to {target_hostname} at {time()} ---")
+#         assert result is True, (
+#         f"The MAC and IP address in {current_hostname} has not moved\n"
+#         )
+
+#     sleep(5)
+#     pid_capture1 = start_packet_capture("vtep1", "vtep1_capture.pcap")
+#     # # pid_capture2 = start_packet_capture("spine1", "spine1_capture_move_from_vtep2_to_vtep1.pcap")
+#     pid_capture2 = start_packet_capture("vtep2", "vtep2_capture.pcap")
+#     # pid_capture3 = start_packet_capture("vtep3", "vtep3_various_delays.pcap")
+#     # pid_capture4 = start_packet_capture("vtep4", "vtep4_various_delays.pcap")
+#     # pid1 = start_background_ping("host4", "192.168.0.1")
+#     # pid2 = start_background_ping("host4", "192.168.0.2")
+#     # pid3 = start_background_ping("host4", "192.168.0.3")
+#     fdb_pid = start_fdb_monitor_on_node(tgen.gears["vtep1"], out_path="/tmp/outputs/fdb_vtep1.txt", pid_path="/tmp/outputs/fdb_monitor_vtep1.pid")
+#     logger.info(f"Started FDB monitor on vtep1 with PID {fdb_pid}")
+#     fdb_pid = start_fdb_monitor_on_node(tgen.gears["vtep2"], out_path="/tmp/outputs/fdb_vtep2.txt", pid_path="/tmp/outputs/fdb_monitor_vtep2.pid")
+#     logger.info(f"Started FDB monitor on vtep2 with PID {fdb_pid}")
+    
+#     sleep(5)  # wait for some pings to be sent
+
+#     # delays = [2, 1, 0.8, 0.5, 0.2, 0.1, 0]
+#     delays = [0.2]
+#     moves = 20 * number_of_dummy
+
+#     # delays = [1]
+#     for delay in delays:
+#         for i in range(moves):
+#             select_dummy = "dummy" + str((i % number_of_dummy) + 1)
+#             # select_dummy = "dummy1"
+#             move_host_from(select_dummy,delay)
+#         sleep(5)
+    
+#     sleep(15)
+        
+#     # tester = tgen.gears["vtep1"]
+#     # print(tester.vtysh_cmd("show evpn mac vni 1000"))
+#     # sleep(5)
+#     # stop_background_ping("host4", pid1)
+#     # stop_background_ping("host4", pid2)
+#     # stop_background_ping("host4", pid3)
+#     stop_background_ping("vtep1", pid_capture1)
+#     # # stop_background_ping("spine1", pid_capture2)
+#     stop_background_ping("vtep2", pid_capture2)
+#     # stop_background_ping("vtep3", pid_capture3)
+#     # stop_background_ping("vtep4", pid_capture4)
+#     stop_fdb_monitor_on_node(tgen.gears["vtep1"], pid_path="/tmp/outputs/fdb_monitor_vtep1.pid")
+#     logger.info("Stopped FDB monitor on vtep1")
+#     stop_fdb_monitor_on_node(tgen.gears["vtep2"], pid_path="/tmp/outputs/fdb_monitor_vtep2.pid")
+#     logger.info("Stopped FDB monitor on vtep2")
+
+#     with open("/tmp/outputs/evpn_show_results.json", "w") as f:
+#         json.dump(delay_data, f, indent=2)
+#     with open("/tmp/outputs/pre_movement_details.json", "w") as f:
+#         json.dump(pre_movement_details, f, indent=2)
+#     with open("/tmp/outputs/after_movement_details.json", "w") as f:
+#         json.dump(after_movement_details, f, indent=2)
 
 
 def test_get_version(tgen):
