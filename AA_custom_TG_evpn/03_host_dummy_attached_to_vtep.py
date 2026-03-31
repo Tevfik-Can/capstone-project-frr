@@ -147,68 +147,83 @@ def config_mapping_server(ms):
 cat > /tmp/ms_listener.py << 'EOF'
 import socket
 import threading
+import time
+import pandas as pd
 
+mac_registrations = pd.DataFrame(columns=["Timestamp", "MAC", "Client_IP", "VNI", "VTEP_IP"])
 mac_table = {}
 
 # ----------------------------
-# Control Plane (UDP listener)
+# Control Plane (listener)
 # ----------------------------
 def control_plane():
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    log_path = "/tmp/ms_control_plane.log"
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind(("0.0.0.0", 5000))
+    sock.listen(5)
+
+    header = "Timestamp,MAC,Client_IP,VNI,VTEP_IP"
+    with open(log_path, "w") as f:
+        f.write(header)
+
+    # Helper log function
+    def log(msg):
+        with open(log_path, "a") as f:
+            f.write(msg)
 
     print("MS: Listening for MAC registrations...")
 
     while True:
-        data, addr = sock.recvfrom(1024)
-        msg = data.decode().strip()
+        conn, addr = sock.accept()
+        with conn:
+            data = conn.recv(1024)
+            if not data:
+                continue
+            msg = data.decode().strip()
+            try:
+                mac, ip, vni, vtep = msg.split(",")
+                mac_table[mac] = vtep
+                timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
 
-        try:
-            mac, ip, vni, vtep = msg.split(",")
-            mac_table[mac] = vtep
-            print(f"[REGISTER] {mac} -> {vtep}")
-        except Exception as e:
-            print(f"[ERROR] Bad registration: {msg} ({e})")
+                new_row = {
+                    "Timestamp": timestamp,
+                    "MAC": mac,
+                    "Client_IP": ip,
+                    "VNI": vni,
+                    "VTEP_IP": vtep
+                }
 
+                # Append to the in-memory pandas DataFrame
+                global mac_registrations
+                mac_registrations = pd.concat([mac_registrations, pd.DataFrame([new_row])], ignore_index=True)
+
+                # Convert the row to CSV string and append to log file
+                csv_row = pd.DataFrame([new_row]).to_csv(index=False, header=False)
+                log(csv_row)
+
+                print(f"[REGISTER] {timestamp} {mac} {ip} {vni} {vtep}")
+
+            except Exception as e:
+                print(f"[ERROR] Bad registration: {msg} - {e}")
 
 # ----------------------------
 # Data Plane (packet intercept)
 # ----------------------------
 def data_plane():
-    try:
-        sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.ntohs(3))
-    except Exception as e:
-        print(f"[ERROR] Raw socket failed: {e}")
-        return
-
-    print("MS: Sniffing packets...")
-
-    while True:
-        packet, addr = sock.recvfrom(65535)
-
-        if len(packet) < 14:
-            continue
-
-        dst_mac = ":".join(f"{b:02x}" for b in packet[0:6])
-
-        if dst_mac in mac_table:
-            vtep_ip = mac_table[dst_mac]
-            print(f"[FORWARD] {dst_mac} -> {vtep_ip}")
-        else:
-            print(f"[MISS] {dst_mac} not found")
-
+    pass
 
 # ----------------------------
 # Main
 # ----------------------------
 t1 = threading.Thread(target=control_plane, daemon=True)
-t2 = threading.Thread(target=data_plane, daemon=True)
+# t2 = threading.Thread(target=data_plane, daemon=True)
 
 t1.start()
-t2.start()
+# t2.start()
 
 t1.join()
-t2.join()
+# t2.join()
 EOF
     """)
 
@@ -348,8 +363,8 @@ def tgen(request):
     config_hosts(tgen, hosts)
 
     for i in range(1,number_of_dummy+1):
-        # select_host = "host" + str(((i-1) % 3)+1)
-        select_host = "host1"  # Forcing all dummies to host1 for easier debugging
+        select_host = "host" + str(((i-1) % 3)+1)
+        # select_host = "host1"  # Forcing all dummies to host1 for easier debugging
         dummy_to_host_map["dummy" + str(i)] = select_host
         config_dummy("dummy" + str(i), tgen.gears[select_host] )
     
@@ -393,7 +408,7 @@ def start_packet_capture(server_name, capture_name='evpn_bgp_test_noname.pcap'):
     """
     tgen = get_topogen()
     server = tgen.gears[server_name]
-    cmd = f"sudo tcpdump -ni any '(port 4789)' -ttt -w /tmp/outputs/{capture_name} > /dev/null 2>&1 & echo $!"
+    cmd = f"sudo tcpdump -ni any tcp port 5000 -ttt -w /tmp/outputs/{capture_name} > /dev/null 2>&1 & echo $!"
     pid = server.run(cmd).strip()
     return pid
 
@@ -473,10 +488,10 @@ def send_mac_registration(vtep, ms_ip, dummy_name, vtep_ip):
     dummy_mac = get_dummy_mac(dummy_name)
     dummy_ip, _ = compute_dummy_ip_mac(dummy_name)
     
-    # Simulate TLV via UDP (simple)
+    # Simulate TLV
     msg = f"{dummy_mac},{dummy_ip},{1000},{vtep_ip}"
 
-    vtep.run(f"echo '{msg}' | nc -u {ms_ip} 5000")
+    vtep.run(f"echo '{msg}' | nc {ms_ip} 5000")
 
 
 def test_host_movement(tgen):
@@ -561,7 +576,7 @@ def test_host_movement(tgen):
 
     # fdb_pid = start_fdb_monitor_on_node(tgen.gears["vtep3"], out_path="/tmp/outputs/fdb_vtep3.txt", pid_path="/tmp/outputs/fdb_monitor_vtep3.pid")
     # logger.info(f"Started FDB monitor on vtep3 with PID {fdb_pid}")
-    pid_ping = start_background_ping("host3", "192.168.0.1")
+    # pid_ping = start_background_ping("host3", "192.168.0.1")
     # pid_capture1 = start_packet_capture("vtep3", f"vtep3_capture_{number_of_dummy}.pcap")
     # pid_capture2 = start_packet_capture("vtep2", f"vtep2_capture_{number_of_dummy}.pcap")
     # pid_capture3 = start_packet_capture("spine1", f"spine1_capture_{number_of_dummy}.pcap")
@@ -578,11 +593,12 @@ def test_host_movement(tgen):
             select_dummy = "dummy" + str((i % number_of_dummy) + 1)
             # select_dummy = "dummy1"
             move_host_from(select_dummy,delay)
+            logger.info(f"{select_dummy} moved")
         sleep(5)
     
     sleep(15)
     # stop_background_ping("vtep3", pid_capture1)
-    stop_background_ping("host3", pid_ping)
+    # stop_background_ping("host3", pid_ping)
     # stop_background_ping("vtep2", pid_capture2)
     # stop_background_ping("spine1", pid_capture3)
     sleep(10)
